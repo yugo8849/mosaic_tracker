@@ -1,0 +1,39 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Linux
+*~
+.directory
+
+# ImageJ/Fiji
+*.ijm.bak
+*.ijm~
+*.tif
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+
+# Logs
+*.log
+
+# Release artifacts (keep originals only)
+*.zip.tmp
+
+# Editor files
+.vscode/
+.idea/
+*.sublime-*
+
+# Test files
+test/
+tests/
+test_images/

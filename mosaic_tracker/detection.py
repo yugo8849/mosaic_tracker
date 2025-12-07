@@ -18,12 +18,19 @@ from dataclasses import dataclass
 from typing import List, Tuple, Optional
 
 # Try to import CuPy for GPU acceleration
+HAS_CUPY = False
 try:
     import cupy as cp
     from cupyx.scipy import ndimage as cp_ndimage
+    # Test if CUDA is actually usable
+    cp.cuda.runtime.getDeviceCount()
     HAS_CUPY = True
 except ImportError:
-    HAS_CUPY = False
+    pass
+except Exception as e:
+    # CUDA driver issues (version mismatch, no GPU, etc.)
+    print(f"Warning: CuPy available but CUDA not usable: {e}")
+    pass
 
 
 @dataclass

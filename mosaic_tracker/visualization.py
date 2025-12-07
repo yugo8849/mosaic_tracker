@@ -586,3 +586,199 @@ def plot_detection_comparison(image: np.ndarray,
     
     plt.tight_layout()
     return fig
+
+
+def plot_vac(vac_result, ax=None, show_zero_line: bool = True,
+             show_decay_time: bool = True, **kwargs):
+    """
+    Plot Velocity Autocorrelation Function.
+    
+    Parameters
+    ----------
+    vac_result : VACResult
+        Result from compute_velocity_autocorrelation
+    ax : matplotlib axes, optional
+        Axes to plot on
+    show_zero_line : bool
+        Show horizontal line at VAC=0
+    show_decay_time : bool
+        Show vertical line at decay time
+        
+    Returns
+    -------
+    ax : matplotlib axes
+    """
+    import matplotlib.pyplot as plt
+    
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(8, 5))
+    
+    # Plot VAC
+    defaults = {'linewidth': 2, 'color': 'C0'}
+    defaults.update(kwargs)
+    ax.plot(vac_result.time_lags, vac_result.vac, '-', **defaults)
+    
+    # Zero line
+    if show_zero_line:
+        ax.axhline(y=0, color='gray', linestyle='--', alpha=0.5)
+    
+    # Decay time marker
+    if show_decay_time and vac_result.decay_time > 0:
+        ax.axvline(x=vac_result.decay_time, color='r', linestyle=':', 
+                   alpha=0.7, label=f'τ_decay = {vac_result.decay_time:.3f}')
+    
+    # 1/e line
+    ax.axhline(y=1/np.e, color='gray', linestyle=':', alpha=0.3)
+    
+    ax.set_xlabel('Time lag τ')
+    ax.set_ylabel('VAC(τ)')
+    ax.set_title('Velocity Autocorrelation')
+    
+    if show_decay_time and vac_result.decay_time > 0:
+        ax.legend()
+    
+    return ax
+
+
+def plot_vac_population(results: List[dict], ax=None, 
+                        alpha: float = 0.3, show_mean: bool = True):
+    """
+    Plot VAC for multiple trajectories.
+    
+    Parameters
+    ----------
+    results : list of dict
+        Results from analyze_all_trajectories (must include 'vac')
+    ax : matplotlib axes, optional
+        Axes to plot on
+    alpha : float
+        Transparency for individual curves
+    show_mean : bool
+        Whether to plot the mean VAC
+        
+    Returns
+    -------
+    ax : matplotlib axes
+    """
+    import matplotlib.pyplot as plt
+    
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(8, 5))
+    
+    # Collect all VACs
+    all_vacs = []
+    max_len = 0
+    
+    for r in results:
+        if 'vac' in r:
+            vac = r['vac']
+            ax.plot(vac.time_lags, vac.vac, '-', color='C0', alpha=alpha)
+            all_vacs.append((vac.time_lags, vac.vac))
+            max_len = max(max_len, len(vac.time_lags))
+    
+    # Compute and plot mean
+    if show_mean and all_vacs:
+        # Interpolate to common time base
+        common_times = all_vacs[0][0]  # Use first trajectory's times
+        mean_vac = np.zeros(len(common_times))
+        counts = np.zeros(len(common_times))
+        
+        for times, vac in all_vacs:
+            for i, t in enumerate(common_times):
+                if i < len(vac):
+                    mean_vac[i] += vac[i]
+                    counts[i] += 1
+        
+        mean_vac = mean_vac / np.maximum(counts, 1)
+        ax.plot(common_times, mean_vac, '-', color='red', linewidth=2, 
+                label='Mean VAC')
+        ax.legend()
+    
+    ax.axhline(y=0, color='gray', linestyle='--', alpha=0.5)
+    ax.set_xlabel('Time lag τ')
+    ax.set_ylabel('VAC(τ)')
+    ax.set_title(f'Velocity Autocorrelation ({len(all_vacs)} trajectories)')
+    
+    return ax
+
+
+def plot_persistence_histogram(results: List[dict], ax=None, bins: int = 30):
+    """
+    Plot histogram of directional persistence values.
+    
+    Parameters
+    ----------
+    results : list of dict
+        Results from analyze_all_trajectories
+    ax : matplotlib axes, optional
+        Axes to plot on
+    bins : int
+        Number of histogram bins
+        
+    Returns
+    -------
+    ax : matplotlib axes
+    """
+    import matplotlib.pyplot as plt
+    
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(8, 5))
+    
+    persistence_values = [r['directional_persistence'] for r in results 
+                         if 'directional_persistence' in r]
+    
+    if persistence_values:
+        ax.hist(persistence_values, bins=bins, edgecolor='black', alpha=0.7)
+        
+        mean_p = np.mean(persistence_values)
+        ax.axvline(x=mean_p, color='r', linestyle='--', 
+                   label=f'Mean = {mean_p:.3f}')
+        ax.axvline(x=0, color='gray', linestyle=':', alpha=0.5)
+        
+        ax.set_xlabel('Directional Persistence (cos θ)')
+        ax.set_ylabel('Count')
+        ax.set_title('Directional Persistence Distribution')
+        ax.set_xlim(-1, 1)
+        ax.legend()
+    
+    return ax
+
+
+def plot_vac_decay_times(results: List[dict], ax=None, bins: int = 20):
+    """
+    Plot histogram of VAC decay times.
+    
+    Parameters
+    ----------
+    results : list of dict
+        Results from analyze_all_trajectories
+    ax : matplotlib axes, optional
+        Axes to plot on
+    bins : int
+        Number of histogram bins
+        
+    Returns
+    -------
+    ax : matplotlib axes
+    """
+    import matplotlib.pyplot as plt
+    
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(8, 5))
+    
+    decay_times = [r['vac_decay_time'] for r in results 
+                  if 'vac_decay_time' in r and r['vac_decay_time'] > 0]
+    
+    if decay_times:
+        ax.hist(decay_times, bins=bins, edgecolor='black', alpha=0.7)
+        
+        mean_t = np.mean(decay_times)
+        ax.axvline(x=mean_t, color='r', linestyle='--', 
+                   label=f'Mean = {mean_t:.3f}')
+        
+        ax.set_xlabel('VAC Decay Time (τ)')
+        ax.set_ylabel('Count')
+        ax.set_title('VAC Decay Time Distribution')
+        ax.legend()
+    
+    return ax

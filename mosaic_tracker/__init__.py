@@ -63,11 +63,60 @@ from .detection import (
     HAS_CUPY
 )
 
-# Linking  
-from .linking import (
+# JAX support (for Mac Apple Silicon)
+try:
+    from .detection_jax import (
+        HAS_JAX,
+        JAX_BACKEND,
+        check_jax,
+        detect_particles_jax,
+        detect_all_frames_jax,
+        restore_image_jax
+    )
+except ImportError:
+    HAS_JAX = False
+    JAX_BACKEND = "unavailable"
+    def check_jax():
+        print("JAX module not available")
+        return False
+
+def check_gpu():
+    """Check GPU availability and print status."""
+    print("=== GPU Status ===")
+    
+    # Check CuPy (NVIDIA)
+    if HAS_CUPY:
+        import cupy as cp
+        device = cp.cuda.Device()
+        print(f"CuPy (NVIDIA): Available")
+        print(f"  Device: {cp.cuda.runtime.getDeviceProperties(0)['name'].decode()}")
+        mem = device.mem_info
+        print(f"  Memory: {mem[1]/1e9:.1f} GB total, {mem[0]/1e9:.1f} GB free")
+    else:
+        print("CuPy (NVIDIA): Not available")
+    
+    # Check JAX
+    if HAS_JAX:
+        import jax
+        print(f"JAX: Available (backend: {JAX_BACKEND})")
+        for d in jax.devices():
+            print(f"  Device: {d}")
+    else:
+        print("JAX: Not available")
+    
+    print()
+    print("Installation hints:")
+    print("  NVIDIA GPU: pip install cupy-cuda12x")
+    print("  Mac (Apple Silicon): pip install jax jax-metal")
+    print("  CPU only: pip install jax")
+    
+    return HAS_CUPY or HAS_JAX
+
+# Linking (optimized with scipy.optimize.linear_sum_assignment + KD-tree)
+from .linking_fast import (
     Trajectory,
-    link_trajectories,
-    link_particles_pair,
+    link_trajectories_fast as link_trajectories,
+    link_frame_pair_fast as link_particles_pair,
     compute_cost
 )
 
@@ -75,10 +124,13 @@ from .linking import (
 from .analysis import (
     MSDResult,
     MSSResult,
+    VACResult,
     compute_msd,
     compute_mss,
     compute_velocity,
     compute_confinement_ratio,
+    compute_velocity_autocorrelation,
+    compute_directional_persistence,
     analyze_trajectory,
     analyze_all_trajectories
 )
@@ -103,7 +155,11 @@ from .visualization import (
     plot_diffusion_histogram,
     plot_motion_type_pie,
     create_tracking_movie,
-    plot_detection_comparison
+    plot_detection_comparison,
+    plot_vac,
+    plot_vac_population,
+    plot_persistence_histogram,
+    plot_vac_decay_times
 )
 
 __all__ = [
@@ -126,6 +182,7 @@ __all__ = [
     'discriminate_particles',
     'preview_detection',
     'HAS_CUPY',
+    'check_gpu',
     
     # Linking
     'link_trajectories',
@@ -160,8 +217,10 @@ __all__ = [
     'plot_detection_comparison',
 ]
 
-# Print GPU status on import
-if HAS_CUPY:
-    print(f"mosaic_tracker v{__version__}: GPU acceleration available (CuPy)")
-else:
-    print(f"mosaic_tracker v{__version__}: CPU mode (install cupy for GPU acceleration)")
+# Print GPU status on import (suppress if running non-interactively)
+import sys
+if sys.flags.interactive or hasattr(sys, 'ps1'):
+    if HAS_CUPY:
+        print(f"mosaic_tracker v{__version__}: GPU acceleration available (CuPy)")
+    else:
+        print(f"mosaic_tracker v{__version__}: CPU mode")

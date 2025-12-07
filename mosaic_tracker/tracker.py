@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .detection import detect_all_frames, Particle
-from .linking import link_trajectories, Trajectory
+from .linking_fast import link_trajectories_fast as link_trajectories, Trajectory
 from .analysis import (
     analyze_trajectory, 
     analyze_all_trajectories,
@@ -61,8 +61,9 @@ class TrackerParameters:
     pixel_size: float = 1.0
     frame_interval: float = 1.0
     
-    # GPU acceleration
-    use_gpu: bool = False
+    # Acceleration options
+    use_gpu: bool = False  # CuPy (NVIDIA)
+    backend: str = 'auto'  # 'auto', 'numpy', 'cupy', 'jax'
 
 
 class ParticleTracker:
@@ -157,6 +158,7 @@ class ParticleTracker:
                         absolute_threshold: Optional[float] = None,
                         cutoff_score: Optional[float] = None,
                         use_gpu: Optional[bool] = None,
+                        backend: Optional[str] = None,
                         verbose: bool = False) -> 'ParticleTracker':
         """
         Detect particles in all frames.
@@ -172,7 +174,9 @@ class ParticleTracker:
         cutoff_score : float, optional
             Non-particle discrimination cutoff (override)
         use_gpu : bool, optional
-            Use GPU acceleration
+            Use GPU acceleration (CuPy)
+        backend : str, optional
+            'auto', 'numpy', 'cupy', 'jax'
         verbose : bool
             Print progress
             
@@ -188,18 +192,53 @@ class ParticleTracker:
         p = percentile if percentile is not None else self.params.percentile
         at = absolute_threshold if absolute_threshold is not None else self.params.absolute_threshold
         c = cutoff_score if cutoff_score is not None else self.params.cutoff_score
+        be = backend if backend is not None else self.params.backend
         gpu = use_gpu if use_gpu is not None else self.params.use_gpu
         
-        self._particles = detect_all_frames(
-            self._movie,
-            radius=r,
-            percentile=p,
-            absolute_threshold=at,
-            cutoff_score=c,
-            lambda_n=self.params.lambda_n,
-            use_gpu=gpu,
-            verbose=verbose
-        )
+        # Determine backend
+        if be == 'auto':
+            # Auto-select: CuPy > JAX > NumPy
+            from .detection import HAS_CUPY
+            try:
+                from .detection_jax import HAS_JAX
+            except ImportError:
+                HAS_JAX = False
+            
+            if gpu and HAS_CUPY:
+                be = 'cupy'
+            elif HAS_JAX:
+                be = 'jax'
+            else:
+                be = 'numpy'
+        
+        if be == 'jax':
+            try:
+                from .detection_jax import detect_all_frames_jax
+                self._particles = detect_all_frames_jax(
+                    self._movie,
+                    radius=r,
+                    percentile=p,
+                    absolute_threshold=at,
+                    cutoff_score=c,
+                    lambda_n=self.params.lambda_n,
+                    verbose=verbose
+                )
+            except ImportError:
+                if verbose:
+                    print("JAX not available, falling back to NumPy")
+                be = 'numpy'
+        
+        if be in ('numpy', 'cupy'):
+            self._particles = detect_all_frames(
+                self._movie,
+                radius=r,
+                percentile=p,
+                absolute_threshold=at,
+                cutoff_score=c,
+                lambda_n=self.params.lambda_n,
+                use_gpu=(be == 'cupy'),
+                verbose=verbose
+            )
         
         # Reset downstream data
         self._trajectories = None
@@ -210,9 +249,12 @@ class ParticleTracker:
     def link_trajectories(self,
                          max_displacement: Optional[float] = None,
                          link_range: Optional[int] = None,
-                         min_length: Optional[int] = None) -> 'ParticleTracker':
+                         min_length: Optional[int] = None,
+                         verbose: bool = False) -> 'ParticleTracker':
         """
         Link detected particles into trajectories.
+        
+        Uses optimized Hungarian algorithm with KD-tree acceleration.
         
         Parameters
         ----------
@@ -222,6 +264,8 @@ class ParticleTracker:
             Override parameter
         min_length : int, optional
             Override parameter
+        verbose : bool
+            Print progress
             
         Returns
         -------
@@ -239,7 +283,8 @@ class ParticleTracker:
             self._particles,
             max_displacement=d,
             link_range=r,
-            min_length=m
+            min_length=m,
+            verbose=verbose
         )
         
         # Reset analysis
@@ -247,7 +292,8 @@ class ParticleTracker:
         
         return self
     
-    def analyze(self, min_length: Optional[int] = None) -> List[dict]:
+    def analyze(self, min_length: Optional[int] = None, 
+                include_vac: bool = True) -> List[dict]:
         """
         Analyze all trajectories.
         
@@ -255,6 +301,8 @@ class ParticleTracker:
         ----------
         min_length : int, optional
             Minimum trajectory length for analysis
+        include_vac : bool
+            Whether to include Velocity Autocorrelation analysis
             
         Returns
         -------
@@ -270,7 +318,8 @@ class ParticleTracker:
             self._trajectories,
             pixel_size=self.params.pixel_size,
             frame_interval=self.params.frame_interval,
-            min_length=m
+            min_length=m,
+            include_vac=include_vac
         )
         
         return self._analysis_results

@@ -469,9 +469,281 @@ def compute_confinement_ratio(trajectory: Trajectory,
     return 1.0
 
 
+@dataclass
+class VACResult:
+    """Result of Velocity Autocorrelation analysis."""
+    time_lags: np.ndarray  # Time lags (tau)
+    vac: np.ndarray  # VAC values (normalized)
+    vac_unnorm: np.ndarray  # VAC values (unnormalized)
+    decay_time: float  # Characteristic decay time (where VAC drops to 1/e)
+    persistence_time: float  # Time where VAC first crosses zero
+    integral: float  # Integral of VAC (related to diffusion via Green-Kubo)
+    diffusion_coeff_gk: float  # Diffusion coefficient from Green-Kubo relation
+    
+    @property
+    def is_persistent(self) -> bool:
+        """Check if motion shows persistent correlations."""
+        # Persistent if VAC > 0.1 at tau = 2
+        if len(self.vac) > 2:
+            return self.vac[2] > 0.1
+        return False
+    
+    @property
+    def is_antipersistent(self) -> bool:
+        """Check if motion shows anti-persistent (confined) correlations."""
+        # Anti-persistent if VAC becomes significantly negative
+        return np.any(self.vac < -0.1)
+    
+    @property
+    def motion_character(self) -> str:
+        """Characterize motion based on VAC shape."""
+        if self.persistence_time < 0:
+            # VAC never crosses zero - persistent/ballistic
+            if np.mean(self.vac) > 0.5:
+                return "ballistic"
+            else:
+                return "persistent"
+        elif self.is_antipersistent:
+            return "confined/antipersistent"
+        elif self.decay_time < 1.5:
+            return "diffusive"
+        else:
+            return "weakly_persistent"
+
+
+def compute_velocity_autocorrelation(trajectory: Trajectory,
+                                     pixel_size: float = 1.0,
+                                     frame_interval: float = 1.0,
+                                     max_lag_fraction: float = 0.25,
+                                     normalize: bool = True) -> VACResult:
+    """
+    Compute Velocity Autocorrelation Function.
+    
+    The VAC measures how velocity at time t correlates with velocity at time t+τ:
+    
+        C_v(τ) = <v(t) · v(t+τ)> / <|v|²>  (normalized)
+        C_v(τ) = <v(t) · v(t+τ)>           (unnormalized)
+    
+    Physical interpretation:
+    - VAC > 0: Velocity persists in same direction (persistent/ballistic motion)
+    - VAC ≈ 0: Random direction changes (diffusive motion)
+    - VAC < 0: Velocity tends to reverse (confined/antipersistent motion)
+    
+    The integral of VAC relates to diffusion coefficient via Green-Kubo relation:
+        D = (1/d) * ∫₀^∞ C_v(τ) dτ  (d = dimensionality)
+    
+    Parameters
+    ----------
+    trajectory : Trajectory
+        Input trajectory
+    pixel_size : float
+        Physical size per pixel (µm)
+    frame_interval : float
+        Time between frames (seconds)
+    max_lag_fraction : float
+        Maximum lag as fraction of trajectory length
+    normalize : bool
+        Whether to normalize by <|v|²>
+        
+    Returns
+    -------
+    result : VACResult
+        VAC analysis result including decay time, persistence, and diffusion estimate
+    """
+    # Compute velocities
+    positions = trajectory.positions * pixel_size
+    frames = trajectory.frames
+    
+    # Handle gaps in trajectory
+    velocities = []
+    time_points = []
+    
+    for i in range(len(positions) - 1):
+        dt = (frames[i + 1] - frames[i]) * frame_interval
+        if dt > 0 and dt <= 2 * frame_interval:  # Only consecutive or nearly consecutive
+            v = (positions[i + 1] - positions[i]) / dt
+            velocities.append(v)
+            time_points.append(i)
+    
+    velocities = np.array(velocities)
+    n_vel = len(velocities)
+    
+    if n_vel < 3:
+        # Not enough data
+        return VACResult(
+            time_lags=np.array([0.0]),
+            vac=np.array([1.0]),
+            vac_unnorm=np.array([0.0]),
+            decay_time=0.0,
+            persistence_time=0.0,
+            integral=0.0,
+            diffusion_coeff_gk=0.0
+        )
+    
+    # Compute mean squared velocity for normalization
+    v_dot_v = np.sum(velocities * velocities, axis=1)  # |v|² for each time
+    mean_v_sq = np.mean(v_dot_v)
+    
+    if mean_v_sq < 1e-10:
+        # Stationary trajectory
+        return VACResult(
+            time_lags=np.array([0.0]),
+            vac=np.array([1.0]),
+            vac_unnorm=np.array([0.0]),
+            decay_time=0.0,
+            persistence_time=0.0,
+            integral=0.0,
+            diffusion_coeff_gk=0.0
+        )
+    
+    # Compute VAC for different lags
+    max_lag = max(2, int(n_vel * max_lag_fraction))
+    
+    time_lags = []
+    vac_values = []
+    vac_unnorm_values = []
+    
+    for lag in range(max_lag):
+        # Compute <v(t) · v(t+lag)>
+        n_pairs = n_vel - lag
+        if n_pairs < 1:
+            break
+        
+        # Dot product of v(t) and v(t+lag)
+        dot_products = np.sum(velocities[:n_pairs] * velocities[lag:n_pairs+lag], axis=1)
+        mean_dot = np.mean(dot_products)
+        
+        time_lags.append(lag * frame_interval)
+        vac_unnorm_values.append(mean_dot)
+        vac_values.append(mean_dot / mean_v_sq if normalize else mean_dot)
+    
+    time_lags = np.array(time_lags)
+    vac = np.array(vac_values)
+    vac_unnorm = np.array(vac_unnorm_values)
+    
+    # Compute decay time (where VAC drops to 1/e ≈ 0.368)
+    decay_time = -1.0  # Default: never decays
+    threshold = 1.0 / np.e
+    for i, v in enumerate(vac):
+        if v < threshold:
+            # Linear interpolation
+            if i > 0:
+                t0, t1 = time_lags[i-1], time_lags[i]
+                v0, v1 = vac[i-1], vac[i]
+                if v0 != v1:
+                    decay_time = t0 + (threshold - v0) * (t1 - t0) / (v1 - v0)
+                else:
+                    decay_time = t0
+            else:
+                decay_time = 0.0
+            break
+    
+    # Compute persistence time (where VAC first crosses zero)
+    persistence_time = -1.0  # Default: never crosses zero
+    for i, v in enumerate(vac):
+        if v <= 0:
+            if i > 0:
+                t0, t1 = time_lags[i-1], time_lags[i]
+                v0, v1 = vac[i-1], vac[i]
+                if v0 != v1:
+                    persistence_time = t0 + (0 - v0) * (t1 - t0) / (v1 - v0)
+                else:
+                    persistence_time = t0
+            else:
+                persistence_time = 0.0
+            break
+    
+    # Compute integral using trapezoidal rule (for Green-Kubo relation)
+    # D = (1/d) * ∫ C_v(τ) dτ, where d = 2 for 2D
+    # We integrate the unnormalized VAC
+    if len(time_lags) > 1:
+        # Use numpy.trapezoid if available (numpy >= 2.0), otherwise trapz
+        try:
+            integral = np.trapezoid(vac_unnorm, time_lags)
+        except AttributeError:
+            integral = np.trapz(vac_unnorm, time_lags)
+    else:
+        integral = 0.0
+    
+    # Green-Kubo diffusion coefficient (2D)
+    diffusion_coeff_gk = integral / 2.0
+    
+    return VACResult(
+        time_lags=time_lags,
+        vac=vac,
+        vac_unnorm=vac_unnorm,
+        decay_time=decay_time if decay_time > 0 else time_lags[-1],
+        persistence_time=persistence_time,
+        integral=integral,
+        diffusion_coeff_gk=max(0, diffusion_coeff_gk)  # D should be non-negative
+    )
+
+
+def compute_directional_persistence(trajectory: Trajectory,
+                                   pixel_size: float = 1.0,
+                                   frame_interval: float = 1.0) -> Tuple[np.ndarray, np.ndarray, float]:
+    """
+    Compute directional persistence (cosine of angle between successive velocities).
+    
+    This is related to VAC but focuses on direction rather than magnitude.
+    
+    Parameters
+    ----------
+    trajectory : Trajectory
+        Input trajectory
+    pixel_size : float
+        Physical size per pixel
+    frame_interval : float
+        Time between frames
+        
+    Returns
+    -------
+    angles : ndarray
+        Angles between successive velocity vectors (radians)
+    cos_angles : ndarray
+        Cosines of angles (persistence values, 1 = same direction, -1 = reversal)
+    mean_persistence : float
+        Mean directional persistence
+    """
+    positions = trajectory.positions * pixel_size
+    
+    if len(positions) < 3:
+        return np.array([]), np.array([]), 0.0
+    
+    # Compute velocity vectors
+    velocities = np.diff(positions, axis=0)
+    
+    # Compute angles between successive velocities
+    angles = []
+    cos_angles = []
+    
+    for i in range(len(velocities) - 1):
+        v1 = velocities[i]
+        v2 = velocities[i + 1]
+        
+        norm1 = np.linalg.norm(v1)
+        norm2 = np.linalg.norm(v2)
+        
+        if norm1 > 1e-10 and norm2 > 1e-10:
+            cos_theta = np.dot(v1, v2) / (norm1 * norm2)
+            cos_theta = np.clip(cos_theta, -1, 1)  # Numerical stability
+            theta = np.arccos(cos_theta)
+            
+            angles.append(theta)
+            cos_angles.append(cos_theta)
+    
+    angles = np.array(angles)
+    cos_angles = np.array(cos_angles)
+    
+    mean_persistence = np.mean(cos_angles) if len(cos_angles) > 0 else 0.0
+    
+    return angles, cos_angles, mean_persistence
+
+
 def analyze_trajectory(trajectory: Trajectory,
                       pixel_size: float = 1.0,
-                      frame_interval: float = 1.0) -> dict:
+                      frame_interval: float = 1.0,
+                      include_vac: bool = True) -> dict:
     """
     Comprehensive trajectory analysis.
     
@@ -483,6 +755,8 @@ def analyze_trajectory(trajectory: Trajectory,
         Physical size per pixel
     frame_interval : float
         Time between frames
+    include_vac : bool
+        Whether to include Velocity Autocorrelation analysis
         
     Returns
     -------
@@ -496,7 +770,7 @@ def analyze_trajectory(trajectory: Trajectory,
     )
     confinement = compute_confinement_ratio(trajectory, pixel_size)
     
-    return {
+    result = {
         'trajectory_id': trajectory.id,
         'length': trajectory.length,
         'duration': (trajectory.end_frame - trajectory.start_frame) * frame_interval,
@@ -513,12 +787,30 @@ def analyze_trajectory(trajectory: Trajectory,
         'confinement_ratio': confinement,
         'is_self_similar': mss_result.is_self_similar
     }
+    
+    if include_vac:
+        vac_result = compute_velocity_autocorrelation(
+            trajectory, pixel_size, frame_interval
+        )
+        _, _, mean_persistence = compute_directional_persistence(
+            trajectory, pixel_size, frame_interval
+        )
+        
+        result['vac'] = vac_result
+        result['vac_decay_time'] = vac_result.decay_time
+        result['vac_persistence_time'] = vac_result.persistence_time
+        result['diffusion_coeff_gk'] = vac_result.diffusion_coeff_gk
+        result['vac_motion_character'] = vac_result.motion_character
+        result['directional_persistence'] = mean_persistence
+    
+    return result
 
 
 def analyze_all_trajectories(trajectories: List[Trajectory],
                             pixel_size: float = 1.0,
                             frame_interval: float = 1.0,
-                            min_length: int = 10) -> List[dict]:
+                            min_length: int = 10,
+                            include_vac: bool = True) -> List[dict]:
     """
     Analyze all trajectories.
     
@@ -532,6 +824,8 @@ def analyze_all_trajectories(trajectories: List[Trajectory],
         Time between frames
     min_length : int
         Minimum trajectory length for analysis
+    include_vac : bool
+        Whether to include Velocity Autocorrelation analysis
         
     Returns
     -------
@@ -541,5 +835,7 @@ def analyze_all_trajectories(trajectories: List[Trajectory],
     results = []
     for traj in trajectories:
         if traj.length >= min_length:
-            results.append(analyze_trajectory(traj, pixel_size, frame_interval))
+            results.append(analyze_trajectory(
+                traj, pixel_size, frame_interval, include_vac
+            ))
     return results

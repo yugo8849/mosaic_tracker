@@ -10,7 +10,7 @@ readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.8"
 authors = [
-    {name = "Cell Cycle Laboratory", email = "lab@example.com"}
+    {name = "Cell Cycle Laboratory", email = "goto.yuhei.4c@kyoto-u.ac.jp"}
 ]
 keywords = [
     "single particle tracking",

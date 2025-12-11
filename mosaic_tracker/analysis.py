@@ -839,3 +839,179 @@ def analyze_all_trajectories(trajectories: List[Trajectory],
                 traj, pixel_size, frame_interval, include_vac
             ))
     return results
+
+
+@dataclass
+class EnsembleMSDResult:
+    """Result of ensemble-averaged MSD analysis."""
+    time_lags: np.ndarray  # Time lags (dt)
+    msd_mean: np.ndarray  # Mean MSD at each time lag
+    msd_std: np.ndarray  # Standard deviation of MSD
+    msd_sem: np.ndarray  # Standard error of the mean
+    n_trajectories: np.ndarray  # Number of trajectories contributing at each lag
+    slope: float  # Slope in log-log plot (alpha)
+    intercept: float  # Intercept in log-log plot
+    diffusion_coeff: float  # Diffusion coefficient D
+    r_squared: float  # R-squared of fit
+    
+    @property
+    def motion_type(self) -> str:
+        """Classify motion type based on alpha."""
+        if self.slope < 0.3:
+            return "confined"
+        elif self.slope < 0.7:
+            return "subdiffusive"
+        elif self.slope < 1.3:
+            return "normal"
+        elif self.slope < 1.7:
+            return "superdiffusive"
+        else:
+            return "ballistic"
+
+
+def compute_ensemble_msd(trajectories: List[Trajectory],
+                         pixel_size: float = 1.0,
+                         frame_interval: float = 1.0,
+                         max_lag_fraction: float = 0.25,
+                         min_trajectories: int = 3) -> EnsembleMSDResult:
+    """
+    Compute ensemble-averaged Mean Square Displacement.
+    
+    This averages the MSD across multiple trajectories at each time lag,
+    providing a population-level view of diffusion behavior.
+    
+    MSD(dt) = <|r(t + dt) - r(t)|^2>_ensemble
+    
+    Parameters
+    ----------
+    trajectories : list of Trajectory
+        Input trajectories
+    pixel_size : float
+        Physical size per pixel (µm)
+    frame_interval : float
+        Time between frames (seconds)
+    max_lag_fraction : float
+        Maximum lag as fraction of median trajectory length
+    min_trajectories : int
+        Minimum number of trajectories required at each lag
+        
+    Returns
+    -------
+    result : EnsembleMSDResult
+        Ensemble MSD analysis result with mean, std, and sem
+    """
+    if not trajectories:
+        return EnsembleMSDResult(
+            time_lags=np.array([0.0]),
+            msd_mean=np.array([0.0]),
+            msd_std=np.array([0.0]),
+            msd_sem=np.array([0.0]),
+            n_trajectories=np.array([0]),
+            slope=0.0,
+            intercept=0.0,
+            diffusion_coeff=0.0,
+            r_squared=0.0
+        )
+    
+    # Determine max lag from median trajectory length
+    lengths = [traj.length for traj in trajectories]
+    median_length = np.median(lengths)
+    max_lag = max(3, int(median_length * max_lag_fraction))
+    
+    # Collect MSD values for each lag
+    msd_by_lag = {dn: [] for dn in range(1, max_lag + 1)}
+    
+    for traj in trajectories:
+        positions = traj.positions * pixel_size
+        frames = traj.frames
+        n_points = len(positions)
+        
+        if n_points < 3:
+            continue
+        
+        # Compute squared displacements for each lag
+        for dn in range(1, min(max_lag + 1, n_points)):
+            sq_displacements = []
+            
+            for i in range(n_points - 1):
+                for j in range(i + 1, n_points):
+                    actual_dn = frames[j] - frames[i]
+                    if actual_dn == dn:
+                        dr = positions[j] - positions[i]
+                        sq_displacements.append(np.sum(dr**2))
+            
+            if sq_displacements:
+                # Use mean of this trajectory's displacements at this lag
+                msd_by_lag[dn].append(np.mean(sq_displacements))
+    
+    # Compute ensemble statistics
+    time_lags = []
+    msd_mean = []
+    msd_std = []
+    msd_sem = []
+    n_trajs = []
+    
+    for dn in sorted(msd_by_lag.keys()):
+        values = msd_by_lag[dn]
+        if len(values) >= min_trajectories:
+            time_lags.append(dn * frame_interval)
+            msd_mean.append(np.mean(values))
+            msd_std.append(np.std(values))
+            msd_sem.append(np.std(values) / np.sqrt(len(values)))
+            n_trajs.append(len(values))
+    
+    if len(time_lags) < 2:
+        return EnsembleMSDResult(
+            time_lags=np.array([0.0]),
+            msd_mean=np.array([0.0]),
+            msd_std=np.array([0.0]),
+            msd_sem=np.array([0.0]),
+            n_trajectories=np.array([0]),
+            slope=0.0,
+            intercept=0.0,
+            diffusion_coeff=0.0,
+            r_squared=0.0
+        )
+    
+    time_lags = np.array(time_lags)
+    msd_mean = np.array(msd_mean)
+    msd_std = np.array(msd_std)
+    msd_sem = np.array(msd_sem)
+    n_trajs = np.array(n_trajs)
+    
+    # Fit in log-log space
+    valid = (time_lags > 0) & (msd_mean > 0)
+    if np.sum(valid) >= 2:
+        log_t = np.log(time_lags[valid])
+        log_msd = np.log(msd_mean[valid])
+        
+        # Linear regression
+        A = np.vstack([log_t, np.ones(len(log_t))]).T
+        result = np.linalg.lstsq(A, log_msd, rcond=None)
+        slope, intercept = result[0]
+        
+        # R-squared
+        y_pred = slope * log_t + intercept
+        ss_res = np.sum((log_msd - y_pred)**2)
+        ss_tot = np.sum((log_msd - np.mean(log_msd))**2)
+        r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
+        
+        # Diffusion coefficient: MSD = 4D*t^alpha, so log(MSD) = log(4D) + alpha*log(t)
+        diffusion_coeff = np.exp(intercept) / 4.0
+    else:
+        slope = 0.0
+        intercept = 0.0
+        r_squared = 0.0
+        diffusion_coeff = 0.0
+    
+    return EnsembleMSDResult(
+        time_lags=time_lags,
+        msd_mean=msd_mean,
+        msd_std=msd_std,
+        msd_sem=msd_sem,
+        n_trajectories=n_trajs,
+        slope=slope,
+        intercept=intercept,
+        diffusion_coeff=diffusion_coeff,
+        r_squared=r_squared
+    )

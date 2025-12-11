@@ -346,13 +346,214 @@ def plot_mss(mss_result,
     return ax
 
 
+def plot_ensemble_msd(ensemble_result,
+                      ax=None,
+                      show_fit: bool = True,
+                      show_error: str = 'sem',
+                      color: str = 'blue',
+                      fit_color: str = 'red',
+                      log_scale: bool = True,
+                      show_reference: bool = True):
+    """
+    Plot ensemble-averaged MSD with error bars/bands.
+    
+    Parameters
+    ----------
+    ensemble_result : EnsembleMSDResult
+        Ensemble MSD analysis result
+    ax : matplotlib axes, optional
+        Axes to plot on
+    show_fit : bool
+        Show power-law fit
+    show_error : str
+        Error display: 'sem' (standard error), 'std' (standard deviation), 
+        'band' (shaded band), or None
+    color : str
+        Data color
+    fit_color : str
+        Fit line color
+    log_scale : bool
+        Use log-log scale
+    show_reference : bool
+        Show reference lines for normal diffusion
+        
+    Returns
+    -------
+    ax : matplotlib axes
+    """
+    import matplotlib.pyplot as plt
+    
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(8, 6))
+    
+    t = ensemble_result.time_lags
+    msd = ensemble_result.msd_mean
+    
+    if len(t) < 2:
+        ax.text(0.5, 0.5, 'Not enough data', ha='center', va='center', transform=ax.transAxes)
+        return ax
+    
+    # Choose error values
+    if show_error == 'sem':
+        error = ensemble_result.msd_sem
+        error_label = 'SEM'
+    elif show_error == 'std':
+        error = ensemble_result.msd_std
+        error_label = 'STD'
+    else:
+        error = None
+        error_label = None
+    
+    if log_scale:
+        # Log-log plot
+        ax.set_xscale('log')
+        ax.set_yscale('log')
+        
+        # Plot data
+        ax.plot(t, msd, 'o-', color=color, label='Ensemble MSD', markersize=6)
+        
+        # Error bands
+        if error is not None and show_error == 'band':
+            ax.fill_between(t, msd - error, msd + error, 
+                           alpha=0.3, color=color, label=f'±{error_label}')
+        elif error is not None:
+            # Error bars (need to handle log scale carefully)
+            ax.errorbar(t, msd, yerr=error, fmt='none', color=color, 
+                       capsize=3, alpha=0.7)
+        
+        # Fit line
+        if show_fit and len(t) > 1:
+            t_fit = np.logspace(np.log10(t.min()), np.log10(t.max()), 100)
+            msd_fit = np.exp(ensemble_result.intercept) * t_fit ** ensemble_result.slope
+            ax.plot(t_fit, msd_fit, '--', color=fit_color, lw=2,
+                   label=f'Fit: α={ensemble_result.slope:.3f}, D={ensemble_result.diffusion_coeff:.4f}')
+        
+        # Reference line for normal diffusion
+        if show_reference and len(t) > 1:
+            # Normal diffusion: MSD = 4Dt, slope = 1
+            t_ref = np.logspace(np.log10(t.min()), np.log10(t.max()), 50)
+            msd_ref = 4 * ensemble_result.diffusion_coeff * t_ref
+            ax.plot(t_ref, msd_ref, ':', color='gray', alpha=0.5, 
+                   label='Normal diffusion (α=1)')
+    else:
+        # Linear plot
+        ax.plot(t, msd, 'o-', color=color, label='Ensemble MSD', markersize=6)
+        
+        if error is not None and show_error == 'band':
+            ax.fill_between(t, msd - error, msd + error, 
+                           alpha=0.3, color=color, label=f'±{error_label}')
+        elif error is not None:
+            ax.errorbar(t, msd, yerr=error, fmt='none', color=color, 
+                       capsize=3, alpha=0.7)
+        
+        if show_fit:
+            t_fit = np.linspace(t.min(), t.max(), 100)
+            msd_fit = np.exp(ensemble_result.intercept) * t_fit ** ensemble_result.slope
+            ax.plot(t_fit, msd_fit, '--', color=fit_color, lw=2,
+                   label=f'Fit: α={ensemble_result.slope:.3f}')
+    
+    ax.set_xlabel('Time lag (τ)')
+    ax.set_ylabel('MSD [µm²]')
+    ax.set_title(f'Ensemble MSD (n={ensemble_result.n_trajectories[0]} trajectories)\n'
+                 f'α={ensemble_result.slope:.3f}, D={ensemble_result.diffusion_coeff:.4f} µm²/s')
+    ax.legend(loc='upper left')
+    ax.grid(True, alpha=0.3, which='both')
+    
+    return ax
+
+
+def plot_msd_population(trajectories,
+                        pixel_size: float = 1.0,
+                        frame_interval: float = 1.0,
+                        ax=None,
+                        alpha: float = 0.3,
+                        color: str = 'blue',
+                        show_ensemble: bool = True,
+                        ensemble_color: str = 'red',
+                        log_scale: bool = True,
+                        max_lag_fraction: float = 0.25):
+    """
+    Plot MSD curves for all trajectories with optional ensemble average overlay.
+    
+    Parameters
+    ----------
+    trajectories : list of Trajectory
+        Input trajectories
+    pixel_size : float
+        Physical size per pixel
+    frame_interval : float
+        Time between frames
+    ax : matplotlib axes, optional
+        Axes to plot on
+    alpha : float
+        Alpha for individual curves
+    color : str
+        Color for individual curves
+    show_ensemble : bool
+        Overlay ensemble average
+    ensemble_color : str
+        Color for ensemble average
+    log_scale : bool
+        Use log-log scale
+    max_lag_fraction : float
+        Maximum lag fraction
+        
+    Returns
+    -------
+    ax : matplotlib axes
+    """
+    import matplotlib.pyplot as plt
+    from .analysis import compute_msd, compute_ensemble_msd
+    
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(8, 6))
+    
+    if log_scale:
+        ax.set_xscale('log')
+        ax.set_yscale('log')
+    
+    # Plot individual MSDs
+    for traj in trajectories:
+        if traj.length < 5:
+            continue
+        
+        msd_result = compute_msd(traj, pixel_size, frame_interval, max_lag_fraction)
+        if len(msd_result.time_lags) > 1 and np.any(msd_result.msd > 0):
+            ax.plot(msd_result.time_lags, msd_result.msd, '-', 
+                   color=color, alpha=alpha, linewidth=0.8)
+    
+    # Ensemble average
+    if show_ensemble:
+        ensemble = compute_ensemble_msd(trajectories, pixel_size, frame_interval, 
+                                        max_lag_fraction)
+        if len(ensemble.time_lags) > 1:
+            ax.plot(ensemble.time_lags, ensemble.msd_mean, 'o-', 
+                   color=ensemble_color, linewidth=2, markersize=5,
+                   label=f'Ensemble (α={ensemble.slope:.2f}, D={ensemble.diffusion_coeff:.4f})')
+            ax.fill_between(ensemble.time_lags, 
+                           ensemble.msd_mean - ensemble.msd_sem,
+                           ensemble.msd_mean + ensemble.msd_sem,
+                           color=ensemble_color, alpha=0.3)
+    
+    ax.set_xlabel('Time lag (τ)')
+    ax.set_ylabel('MSD [µm²]')
+    ax.set_title(f'MSD Population (n={len(trajectories)} trajectories)')
+    ax.legend()
+    ax.grid(True, alpha=0.3, which='both')
+    
+    return ax
+
+
 def plot_diffusion_histogram(results: List[dict],
                             ax=None,
                             bins: int = 30,
                             log_scale: bool = True,
-                            color: str = 'steelblue'):
+                            color: str = 'steelblue',
+                            show_kde: bool = True,
+                            kde_color: str = 'red',
+                            kde_bw: str = 'scott'):
     """
-    Plot histogram of diffusion coefficients.
+    Plot histogram of diffusion coefficients with optional KDE overlay.
     
     Parameters
     ----------
@@ -366,6 +567,12 @@ def plot_diffusion_histogram(results: List[dict],
         Use log scale for x-axis
     color : str
         Histogram color
+    show_kde : bool
+        Show Kernel Density Estimation curve
+    kde_color : str
+        KDE curve color
+    kde_bw : str
+        KDE bandwidth method ('scott', 'silverman', or float)
         
     Returns
     -------
@@ -377,27 +584,159 @@ def plot_diffusion_histogram(results: List[dict],
         fig, ax = plt.subplots(figsize=(8, 6))
     
     d_coeffs = [r['diffusion_coefficient'] for r in results]
-    d_coeffs = [d for d in d_coeffs if d > 0]  # Filter zeros
+    d_coeffs = np.array([d for d in d_coeffs if d > 0])  # Filter zeros
     
-    if log_scale and d_coeffs:
-        ax.hist(np.log10(d_coeffs), bins=bins, color=color, edgecolor='black')
-        ax.set_xlabel('log₁₀(Diffusion coefficient)')
+    if len(d_coeffs) == 0:
+        ax.text(0.5, 0.5, 'No valid data', ha='center', va='center', transform=ax.transAxes)
+        return ax
+    
+    # Use log10 values if log_scale
+    if log_scale:
+        data = np.log10(d_coeffs)
+        xlabel = 'log₁₀(D) [µm²/s]'
     else:
-        ax.hist(d_coeffs, bins=bins, color=color, edgecolor='black')
-        ax.set_xlabel('Diffusion coefficient')
+        data = d_coeffs
+        xlabel = 'D [µm²/s]'
     
-    ax.set_ylabel('Count')
+    # Plot histogram (normalized for KDE comparison)
+    if show_kde:
+        ax.hist(data, bins=bins, color=color, edgecolor='black', 
+                alpha=0.7, density=True, label='Histogram')
+    else:
+        ax.hist(data, bins=bins, color=color, edgecolor='black', alpha=0.7)
+    
+    # KDE overlay
+    if show_kde and len(d_coeffs) > 2:
+        from scipy import stats
+        
+        # Compute KDE
+        kde = stats.gaussian_kde(data, bw_method=kde_bw)
+        x_range = np.linspace(data.min() - 0.5, data.max() + 0.5, 200)
+        kde_values = kde(x_range)
+        
+        ax.plot(x_range, kde_values, color=kde_color, lw=2, label='KDE')
+    
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel('Density' if show_kde else 'Count')
     ax.set_title(f'Diffusion Coefficient Distribution (n={len(d_coeffs)})')
     
     # Add statistics
-    if d_coeffs:
-        mean_d = np.mean(d_coeffs)
-        median_d = np.median(d_coeffs)
-        ax.axvline(np.log10(mean_d) if log_scale else mean_d, 
-                  color='red', linestyle='--', label=f'Mean: {mean_d:.4f}')
-        ax.axvline(np.log10(median_d) if log_scale else median_d, 
-                  color='orange', linestyle='--', label=f'Median: {median_d:.4f}')
-        ax.legend()
+    mean_d = np.mean(d_coeffs)
+    median_d = np.median(d_coeffs)
+    std_d = np.std(d_coeffs)
+    
+    if log_scale:
+        mean_pos = np.log10(mean_d)
+        median_pos = np.log10(median_d)
+    else:
+        mean_pos = mean_d
+        median_pos = median_d
+    
+    ax.axvline(mean_pos, color='darkgreen', linestyle='--', lw=1.5,
+               label=f'Mean: {mean_d:.4f}')
+    ax.axvline(median_pos, color='orange', linestyle='--', lw=1.5,
+               label=f'Median: {median_d:.4f}')
+    
+    ax.legend(loc='upper right')
+    
+    # Add text box with statistics
+    stats_text = f'n = {len(d_coeffs)}\nMean = {mean_d:.4f}\nMedian = {median_d:.4f}\nStd = {std_d:.4f}'
+    ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, fontsize=9,
+            verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    
+    return ax
+
+
+def plot_diffusion_kde(results: List[dict],
+                       ax=None,
+                       log_scale: bool = True,
+                       color: str = 'steelblue',
+                       fill: bool = True,
+                       fill_alpha: float = 0.3,
+                       bw_method: str = 'scott',
+                       show_rug: bool = True):
+    """
+    Plot Kernel Density Estimation of diffusion coefficients.
+    
+    Parameters
+    ----------
+    results : list of dict
+        Analysis results
+    ax : matplotlib axes, optional
+        Axes to plot on
+    log_scale : bool
+        Use log scale for x-axis
+    color : str
+        Line and fill color
+    fill : bool
+        Fill under KDE curve
+    fill_alpha : float
+        Alpha for fill
+    bw_method : str
+        Bandwidth method ('scott', 'silverman', or float)
+    show_rug : bool
+        Show rug plot (individual data points)
+        
+    Returns
+    -------
+    ax : matplotlib axes
+    """
+    import matplotlib.pyplot as plt
+    from scipy import stats
+    
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(8, 6))
+    
+    d_coeffs = [r['diffusion_coefficient'] for r in results]
+    d_coeffs = np.array([d for d in d_coeffs if d > 0])
+    
+    if len(d_coeffs) < 3:
+        ax.text(0.5, 0.5, 'Not enough data for KDE', ha='center', va='center', transform=ax.transAxes)
+        return ax
+    
+    # Use log10 values if log_scale
+    if log_scale:
+        data = np.log10(d_coeffs)
+        xlabel = 'log₁₀(D) [µm²/s]'
+    else:
+        data = d_coeffs
+        xlabel = 'D [µm²/s]'
+    
+    # Compute KDE
+    kde = stats.gaussian_kde(data, bw_method=bw_method)
+    x_range = np.linspace(data.min() - 0.5, data.max() + 0.5, 200)
+    kde_values = kde(x_range)
+    
+    # Plot KDE
+    ax.plot(x_range, kde_values, color=color, lw=2)
+    
+    if fill:
+        ax.fill_between(x_range, kde_values, alpha=fill_alpha, color=color)
+    
+    # Rug plot
+    if show_rug:
+        ax.plot(data, np.zeros_like(data) - 0.02 * kde_values.max(), '|', 
+                color=color, alpha=0.5, markersize=10)
+    
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel('Density')
+    ax.set_title(f'Diffusion Coefficient KDE (n={len(d_coeffs)})')
+    
+    # Statistics
+    mean_d = np.mean(d_coeffs)
+    median_d = np.median(d_coeffs)
+    
+    if log_scale:
+        ax.axvline(np.log10(mean_d), color='darkgreen', linestyle='--', 
+                   label=f'Mean: {mean_d:.4f}')
+        ax.axvline(np.log10(median_d), color='orange', linestyle='--',
+                   label=f'Median: {median_d:.4f}')
+    else:
+        ax.axvline(mean_d, color='darkgreen', linestyle='--', label=f'Mean: {mean_d:.4f}')
+        ax.axvline(median_d, color='orange', linestyle='--', label=f'Median: {median_d:.4f}')
+    
+    ax.legend()
+    ax.set_ylim(bottom=0)
     
     return ax
 
